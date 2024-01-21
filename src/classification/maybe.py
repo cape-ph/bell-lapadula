@@ -10,6 +10,13 @@ class ExpectationError(ValueError):
     pass
 
 
+class Missing:
+    """An object representing a missing value."""
+
+
+MISSING = Missing()
+
+
 class Maybe(Generic[T]):
     """The Maybe monad, used to represent values that may be undefined.
 
@@ -43,13 +50,21 @@ class Maybe(Generic[T]):
         self._value = value
         self._error = error
 
+    @property
+    def value(self) -> T | Missing:
+        return self._value
+
+    @property
+    def error(self) -> Exception | None:
+        return self._error
+
     def __repr__(self) -> str:
-        if self._value is None:
+        if self.value is MISSING:
             return "Maybe.nothing"
-        return f"Maybe.just({self._value})"
+        return f"Maybe.just({self.value})"
 
     @staticmethod
-    def just(value: T) -> "Maybe[T]":
+    def just(value: U) -> "Maybe[U]":
         """Create a Maybe that stores a valid value.
 
         Args:
@@ -75,10 +90,10 @@ class Maybe(Generic[T]):
             error = ExpectationError(error)
         elif error is None:
             error = ExpectationError()
-        return cast(Maybe[T], Maybe(None, error))
+        return cast(Maybe[T], Maybe(MISSING, error))
 
     def is_valid(self) -> bool:
-        return self._error is None
+        return self.error is None
 
     def map(self, func: Callable[[T], U]) -> "Maybe[U]":
         """Map the value using a function
@@ -90,10 +105,10 @@ class Maybe(Generic[T]):
             Maybe[U]: the maybe storing the mapped value or error
         """
         if not self.is_valid():
-            res = Maybe.nothing(self._error)
+            res: Maybe[T] = Maybe.nothing(self.error)
         else:
             try:
-                res = Maybe.just(func(self._value))
+                res = Maybe.just(func(self.expect()))  # type: ignore
             except Exception as e:
                 res = Maybe.nothing(e)
         return cast(Maybe[U], res)
@@ -109,8 +124,8 @@ class Maybe(Generic[T]):
             Maybe[U]: the maybe storing the mapped value or error
         """
         if not self.is_valid():
-            return cast(Maybe[U], Maybe.nothing(self._error))
-        return func(self._value)
+            return cast(Maybe[U], Maybe.nothing(self.error))
+        return func(self.expect())
 
     def if_error(self, func: Callable[[Exception], "Maybe[T]"]) -> "Maybe[T]":
         """If an error has occurred, manage it with a callback function
@@ -126,7 +141,9 @@ class Maybe(Generic[T]):
         """
         if self.is_valid():
             return self
-        return func(self._error)
+        if self.error is None:
+            return func(ExpectationError())
+        return func(self.error)
 
     def expect(self, msg: Optional[str | Exception] = None) -> T:
         """Get the stored value or raise an exception if an error has occurred
@@ -151,8 +168,10 @@ class Maybe(Generic[T]):
                 raise msg
             elif isinstance(msg, str):
                 raise ExpectationError(msg)
-            elif self._error is not None:
-                raise self._error
+            elif self.error is not None:
+                raise self.error
             else:
                 raise ExpectationError()
-        return self._value
+        if isinstance(self.value, Missing):
+            raise ExpectationError()
+        return self.value

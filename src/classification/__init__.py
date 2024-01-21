@@ -1,1 +1,1 @@
-from classification.lib import Classification, Classified  # noqa: F401
+from classification.classified import Classification, Classified  # noqa: F401
