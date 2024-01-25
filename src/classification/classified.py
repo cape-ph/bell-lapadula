@@ -1,66 +1,178 @@
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Iterable, Optional, Union, cast
+from typing import (
+    AbstractSet,
+    Any,
+    Callable,
+    Generator,
+    Generic,
+    Iterable,
+    LiteralString,
+    Optional,
+    Union,
+    cast,
+)
 
 from classification.maybe import MISSING, ExpectationError, Maybe, Missing, T, U
+
+UNCLASSIFIED = "UNCLASSIFIED"
+
+
+def _is_subset(a: AbstractSet, b: AbstractSet) -> bool:
+    """Test if a is a subset of b
+
+    Note:
+        Python's implementation of the < operator does not treat the empty set
+        as a subset of itself.  This function is consistent with the
+        mathematical definition.
+
+    Args:
+        a (AbstractSet): the subset to test
+        b (AbstractSet): the superset to test
+
+    Returns:
+        bool: whether a is a subset of b
+    """
+    if len(a) == 0:
+        return True
+    return a < b
 
 
 class Classification:
     """A type for a classification marking."""
 
-    def __init__(self, *categories: str):
+    def __init__(self, level: Iterable[str], compartment: Iterable[str]):
         """Create a classification marking
 
         Args:
-            categories (str): the classification categories
+            level (Iterable[str]): the classification level
+            compartment (Iterable[str]): the classification
+                compartment
         """
-        self.categories = frozenset(categories)
+        self.level = frozenset(level)
+        self.compartment = frozenset(compartment)
 
     @staticmethod
     def coerce(
-        value: "Classification" | Iterable[str] | None,
+        level: "Classification" | LiteralString | Iterable[str] | None,
+        compartment: Optional[Iterable[str]] = None,
     ) -> "Classification":
         """Cast the value into a classification
 
         Args:
-            value (Classification | Iterable[str] | None): the classification
-                labels.  If None, default to the empty (e.g. unclassified)
-                label set.
+            level (Classification | LiteralString | Iterable[str] | None): the
+                classification level.  If the argument already is a
+                classification, it is returned.  If the argument is a literal
+                string, we parse it to generate a classification.  If the
+                argument is an iterable of strings, we treat each member
+                string as a classification label.  If the argument is None
+                then we treat it as UNCLASSIFIED.
+            compartment (Iterable[str] | None): the classification compartment.
+                None corresponds to the empty set (no compartments).
 
         Returns:
             Classification: the classification
         """
-        if isinstance(value, Classification):
-            return value
-        elif value is None:
-            return Classification()
-        else:
-            return Classification(*value)
+        if isinstance(level, Classification):
+            return level
+        if isinstance(level, str):
+            return _parse_classification_string(level)
+        level = frozenset(() if level is None else level)
+        compartment = frozenset(() if compartment is None else compartment)
+        return Classification(level, compartment)
 
     def __repr__(self) -> str:
-        return "(" + "//".join(sorted(self.categories)) + ")"
+        level_part = (
+            "/".join(sorted(self.level))
+            if len(self.level) > 0
+            else UNCLASSIFIED
+        )
+        comp_part = "/".join(sorted(self.compartment))
+
+        if len(comp_part) > 0:
+            return f"({level_part}//{comp_part})"
+        else:
+            return f"({level_part})"
 
     def __eq__(self, other: object) -> bool:
-        if not hasattr(other, "categories"):
+        if not (hasattr(other, "level") and hasattr(other, "compartment")):
             return False
-        return self.categories == other.categories
+        return (self.level == other.level) and (
+            self.compartment == other.compartment
+        )
 
     def __lt__(self, other: "Classification") -> bool:
-        return self.categories < other.categories
+        first_clause = _is_subset(self.level, other.level) and (
+            self.compartment <= other.compartment
+        )
+        second_clause = (self.level <= other.level) and _is_subset(
+            self.compartment, other.compartment
+        )
+        return first_clause or second_clause
 
     def __le__(self, other: "Classification") -> bool:
-        return self.categories <= other.categories
+        return (self.level <= other.level) and (
+            self.compartment <= other.compartment
+        )
 
     def __gt__(self, other: "Classification") -> bool:
-        return self.categories > other.categories
+        first_clause = _is_subset(other.level, self.level) and (
+            other.compartment <= self.compartment
+        )
+        second_clause = (other.level <= self.level) and _is_subset(
+            other.compartment, self.compartment
+        )
+        return first_clause or second_clause
 
     def __ge__(self, other: "Classification") -> bool:
-        return self.categories >= other.categories
+        return (self.level >= other.level) and (
+            self.compartment >= other.compartment
+        )
 
 
 class ClassificationViolationError(ValueError):
     """Raised when a classification rule is violated"""
 
     pass
+
+
+def _parse_classification_string(class_str: str) -> Classification:
+    def _remove_parens(class_str: str):
+        start = class_str.find("(")
+        end = class_str.rfind(")")
+        if start != -1 and end != -1:
+            return class_str[start + 1 : end]
+        elif start != -1 or end != -1:
+            msg = f"invalid classification marking: {class_str}"
+            raise ValueError(msg)
+        else:
+            return class_str
+
+    def _split(string: str, char: str, length: int) -> tuple[str | None, ...]:
+        res: list[str | None] = []
+        for v in string.strip().split(char):
+            if len(res) < length:
+                res.append(v)
+        while len(res) < length:
+            res.append(None)
+        return tuple(res)
+
+    level_str, comp_str = _split(_remove_parens(class_str), "//", 2)
+
+    if (level_str is None) or (len(level_str) == 0):
+        level = {}
+    else:
+        level = {
+            lab.strip()
+            for lab in level_str.split("/")
+            if lab.strip() != UNCLASSIFIED
+        }
+
+    if (comp_str is None) or (len(comp_str) == 0):
+        comp = {}
+    else:
+        comp = {lab.strip() for lab in comp_str.split("/")}
+
+    return Classification.coerce(level, comp)
 
 
 def union(classifications: Iterable[Classification]) -> Classification:
@@ -76,12 +188,14 @@ def union(classifications: Iterable[Classification]) -> Classification:
             classifications.
     """
 
-    def iter_categories():
-        for c in classifications:
-            yield from c.categories
+    def flatten(seq: Iterable[Iterable[T]]) -> Generator[T, None, None]:
+        for iterator in seq:
+            yield from iterator
 
-    categories = tuple(iter_categories())
-    return Classification(*categories)
+    clss = list(classifications)
+    level = flatten([c.level for c in clss])
+    compartment = flatten([c.compartment for c in clss])
+    return Classification.coerce(level, compartment)
 
 
 # Note:
